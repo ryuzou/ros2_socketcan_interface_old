@@ -14,7 +14,7 @@
 #include <linux/can.h>
 
 #include "socketcan_interface_msg/msg/socketcan_if.hpp"
-#include "visibility.h"
+#include "visibility_control.h"
 
 using LNI = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface;
 
@@ -38,6 +38,7 @@ namespace socketcan_interface {
         void _publisher_callback();
         void _subscriber_callback(socketcan_interface_msg::msg::SocketcanIF msg);
     public:
+        
         ROS2_SOCKETCAN_INTERFACE_PUBLIC
         explicit SocketcanInterface(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 

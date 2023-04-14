@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <linux/can.h>
+#include <linux/can/raw.h>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -25,7 +26,6 @@ namespace socketcan_interface {
         declare_parameter("interval_ms", 1);
         can_interface_name = this->declare_parameter<std::string>("can_if", "vcan0");
         interval_ms = this->get_parameter("interval_ms").as_int();
-
     }
 
     void SocketcanInterface::_publisher_callback() {
@@ -36,11 +36,11 @@ namespace socketcan_interface {
         auto msg = std::make_shared<socketcan_interface_msg::msg::SocketcanIF>();
 
         int nbytes;
-        struct can_frame frame{};
+        struct canfd_frame frame{};
         errno = 0;
 
         while (true) {
-            nbytes = read(s, &frame, sizeof(struct can_frame));
+            nbytes = read(s, &frame, sizeof(struct canfd_frame));
             if (nbytes < 0) {
                 if (errno !=
                     (EAGAIN | EWOULDBLOCK)) {   // these errors occur when nothing can be read in non-blocking mode, so ignore.
@@ -48,16 +48,16 @@ namespace socketcan_interface {
                 }
                 break;
             }
-            RCLCPP_INFO(this->get_logger(), "Published ID:0x%03X [%d] ", frame.can_id, frame.can_dlc);
+            RCLCPP_INFO(this->get_logger(), "Published ID:0x%03X [%d] ", frame.can_id, frame.len);
             msg->canid = frame.can_id;
-            msg->candlc = frame.can_dlc;
-            for (int i = 0; i < frame.can_dlc; i++) {
+            msg->candlc = frame.len;
+            for (int i = 0; i < frame.len; i++) {
                 msg->candata[i] = frame.data[i];
             }
 
             if (known_id_rx_publisher.find(frame.can_id) == known_id_rx_publisher.end()) {
                 known_id_rx_publisher[frame.can_id] = this->create_publisher<socketcan_interface_msg::msg::SocketcanIF>(
-                        std::string("can_rx_" + std::to_string(frame.can_id)), _qos);
+                        std::string("/can_rx_" + std::to_string(frame.can_id)), _qos);
             }
             known_id_rx_publisher[frame.can_id]->publish(*msg);
         }
@@ -68,25 +68,25 @@ namespace socketcan_interface {
             return;
         }
 
-        struct can_frame frame{};
+        struct canfd_frame frame{};
 
         frame.can_id = msg.canid;
-        if ((msg.candlc > 0) and (msg.candlc <= 9)) {
-            frame.can_dlc = msg.candlc;
+        if ((msg.candlc > 0) and (msg.candlc <= 64)) {
+            frame.len = msg.candlc;
         } else {
-            frame.can_dlc = 8;
+            frame.len = 64;
         }
         std::string can_data_print;
-        for (int i = 0; i < frame.can_dlc; ++i) {
+        for (int i = 0; i < frame.len; ++i) {
             frame.data[i] = msg.candata[i];
 
             char str[64];
             sprintf(str, "0x%03X, ", msg.candata[i]);
             can_data_print = can_data_print + str;
         }
-        RCLCPP_INFO(this->get_logger(), "Sending to can bus ID: 0x%03X, can data: %s", msg.canid, can_data_print.c_str());
+        //RCLCPP_INFO(this->get_logger(), "Sending to can bus ID: 0x%03X, can data: %s", msg.canid, can_data_print.c_str());
 
-        if (write(s, &frame, sizeof(struct can_frame)) != sizeof(struct can_frame)) {
+        if (write(s, &frame, sizeof(struct canfd_frame)) != sizeof(struct canfd_frame)) {
             perror("Write frame0");
             RCLCPP_ERROR(this->get_logger(), "Write error");
         }
@@ -100,7 +100,7 @@ namespace socketcan_interface {
                 [this] { _publisher_callback(); }
         );
         _subscription = this->create_subscription<socketcan_interface_msg::msg::SocketcanIF>(
-                "can_tx",
+                "/can_tx",
                 _qos,
                 std::bind(&SocketcanInterface::_subscriber_callback, this, std::placeholders::_1)
         );
@@ -122,6 +122,21 @@ namespace socketcan_interface {
         memset(&addr, 0, sizeof(addr));
         addr.can_family = AF_CAN;
         addr.can_ifindex = ifr.ifr_ifindex;
+
+        if (ioctl(s, SIOCGIFMTU, &ifr) < 0) {
+            RCLCPP_ERROR(this->get_logger(), "SIOCGIFMTU");
+            return LNI::CallbackReturn::ERROR;
+        }
+        int mtu = ifr.ifr_mtu;
+
+        if (mtu != CANFD_MTU) {
+            RCLCPP_ERROR(this->get_logger(), "CAN interface is not CAN FD capable");
+            return LNI::CallbackReturn::ERROR;
+        }
+
+        int enable_canfd = 1;
+        /* interface is ok - try to switch the socket into CAN FD mode */
+        setsockopt(s, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable_canfd, sizeof(enable_canfd));
 
         if (bind(s, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
             RCLCPP_ERROR(this->get_logger(), "Error at Binding socket: %s", strerror(errno));
